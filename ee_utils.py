@@ -11,22 +11,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 def get_utm_epsg(pt: Tuple[float, float]) -> Optional[str]:
     """
-    Determine the UTM EPSG code for a given longitude and latitude.
+    Determine the UTM EPSG code for a given lon, lat pair in WGS84.
     """
     lon, lat = pt
-    assert (-180 <= lon <= 180 and -80 <= lat <= 84),  "UTM defined for latitudes between -80 and 84 degrees"
+    assert (-180 <= lon <= 180 and -80 <= lat <= 84),  "UTM only defined for latitudes between -80 and 84 degrees"
 
-    utm_zone = int((lon + 180) / 6) + 1                             # UTM zone number (ignoring Svalbaard)
-    epsg_code = 32600 + utm_zone if lat >= 0 else 32700 + utm_zone  # 326xx for SH and 327xx for NH
+    utm_zone = int((lon + 180) / 6) + 1                               # UTM zone number (ignoring Svalbaard)
+    epsg_code = 32600 + utm_zone if lat >= 0 else 32700 + utm_zone    # 326xx for SH and 327xx for NH
 
     return f"EPSG:{epsg_code}"
 
 
 def wgs84_to_utm(pt: tuple[float, float], crs_epsg: str) -> tuple[float, float]:
     """
-    Convert latitude and longitude to UTM coordinates.
+    Convert latitude and longitude to UTM coordinates in the requested zone.
     """
-    # Convert coordinates from WGS84 to UTM
     transformer = Transformer.from_crs(crs_from="epsg:4326", crs_to=crs_epsg, always_xy=True)
     return transformer.transform(*pt)
 
@@ -38,7 +37,7 @@ def preview_patch(image: ee.Image,
                   patch_size=256
                   ):
     """
-    Gets URL for an image at designated point, with defaults for Landsat images.
+    Gets URL for an image at designated point, with defaults for Sentinel 1 images.
     """
 
     # Get Vis Params
@@ -81,16 +80,11 @@ def get_patch(image: ee.Image,
               add_x_offset: int = 0,
               add_y_offset: int = 0,
               file_format: str = "NUMPY_NDARRAY"):
-    """Get a patch centered on the coordinates as a structured numpy array.
-    NOTE:
-        - coords expects [lon, lat] with coordinate values in WGS84.
-        - projection dict is ignored if scale and CRS are supplied.
-        - all bands in the input image are retried. Drop bands in input image to select only certain bands."""
+    """Get a patch centered on the coordinates (defaults to a structured numpy array).
+    NOTE: Coords expects [lon, lat] with coordinate values in WGS84."""
+
     if crs_epsg is None:
         crs_epsg = get_utm_epsg(pt)
-
-    if not isinstance(image, ee.Image):
-        raise TypeError("Input image must be an ee.Image object")
 
     # Unpack scale
     if isinstance(scale, int):
@@ -100,6 +94,12 @@ def get_patch(image: ee.Image,
         assert isinstance(scale_x, int) and isinstance(scale_y, int), "Scale values must be integers"
     else:
         raise TypeError("Scale must be an integer or tuple of two integers")
+
+    # Check that export params are valid
+    if not isinstance(image, ee.Image):
+        raise TypeError("Input image must be an ee.Image object")
+
+    assert scale_x > 0 > scale_y, "Scale values must be positive integers"
 
     # Convert WGS84 to UTM
     centroid = wgs84_to_utm(pt, crs_epsg=crs_epsg)
@@ -209,47 +209,86 @@ def plot_neighbourhood(patches: Union[np.ndarray, dict],
 
 
 class LandsatSR:
-    def __init__(self, start_date: str, end_date: str) -> None:
+    def __init__(self, start_date: str, end_date: str, bands: list[str] = None,
+                 platforms: list[str] = None, rescale_bands: bool = True) -> None:
         """
-        Args
-        - start_date: str, string representation of start date
-        - end_date: str, string representation of end date
+        Args:
+            start_date (str): String representation of start date.
+            end_date (str): String representation of end date.
+            bands (list[str]): Optional list of bands to select.
+            platforms (list[str]): Optional list of Landsat platforms (e.g. ["LANDSAT_8", "LANDSAT_9"]).
+            rescale_bands (bool): If true, rescales Landsat bands by EE defaults.
         """
         self.start_date = start_date
         self.end_date = end_date
+        self.bands = bands
+        self.rescale_bands = rescale_bands
+        self.available_platforms = {"LANDSAT_4", "LANDSAT_5", "LANDSAT_7", "LANDSAT_8", "LANDSAT_9"}
+        self.available_bands = {'BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1'}
 
-        self.l7 = (
-            ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
-            .filter('WRS_ROW < 122')                            # Remove nighttime images
-            .filterDate(self.start_date, self.end_date)         # Filter to desired range
-            .linkCollection(                                    # use TOA Thermal Band values due to processing issues
-                ee.ImageCollection('LANDSAT/LE07/C02/T1_TOA'),
-                linkedBands='B6_VCID_1')
-            .map(self.prep_l47)
-        )
+        # If no platforms provided, use all available
+        if platforms is None:
+            self.platforms = self.available_platforms
+        elif isinstance(platforms, str):
+            self.platforms = {platforms.upper()}
+        else:
+            self.platforms = {p.upper() for p in platforms}
 
-        self.l8 = (
-            ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
-            .filter('WRS_ROW < 122')                            # Remove nighttime images
-            .filterDate(self.start_date, self.end_date)         # Filter to desired range
-            .linkCollection(                                    # use TOA Thermal Band values due to processing issues
-                ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA'),
-                linkedBands='B10')
-            .map(self.prep_l89)
-        )
+        # Check arguments
+        if not self.platforms.issubset(self.available_platforms):
+            raise ValueError(f"Platforms must be a subset of {self.available_platforms}")
 
-        self.l9 = (
-            ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
-            .filter('WRS_ROW < 122')                            # Remove nighttime images
-            .filterDate(self.start_date, self.end_date)         # Filter to desired range
-            .linkCollection(                                    # use TOA Thermal Band values due to processing issues
-                ee.ImageCollection('LANDSAT/LC09/C02/T1_TOA'),
-                linkedBands='B10')
-            .map(self.prep_l89)
-        )
+        self.platform_configs = {
+            "LANDSAT_4": {
+                "sr": 'LANDSAT/LT04/C02/T1_L2',
+                "toa": 'LANDSAT/LT04/C02/T1_TOA',
+                "thermal_band": 'B6',
+                "prep_function": self.prep_l47 if self.rescale_bands else self.prep_l47_no_rescale,
+            },
+            "LANDSAT_5": {
+                "sr": 'LANDSAT/LT05/C02/T1_L2',
+                "toa": 'LANDSAT/LT05/C02/T1_TOA',
+                "thermal_band": 'B6',
+                "prep_function": self.prep_l47 if self.rescale_bands else self.prep_l47_no_rescale,
+            },
+            "LANDSAT_7": {
+                "sr": 'LANDSAT/LE07/C02/T1_L2',
+                "toa": 'LANDSAT/LE07/C02/T1_TOA',
+                "thermal_band": 'B6_VCID_1',
+                "prep_function": self.prep_l47 if self.rescale_bands else self.prep_l47_no_rescale,
+            },
+            "LANDSAT_8": {
+                "sr": 'LANDSAT/LC08/C02/T1_L2',
+                "toa": 'LANDSAT/LC08/C02/T1_TOA',
+                "thermal_band": 'B10',
+                "prep_function": self.prep_l89 if self.rescale_bands else self.prep_l89_no_rescale,
+            },
+            "LANDSAT_9": {
+                "sr": 'LANDSAT/LC09/C02/T1_L2',
+                "toa": 'LANDSAT/LC09/C02/T1_TOA',
+                "thermal_band": 'B10',
+                "prep_function": self.prep_l89 if self.rescale_bands else self.prep_l89_no_rescale,
+            },
+        }
 
-        # Merge all collections
-        self.all = self.l7.merge(self.l8).merge(self.l9)
+        # Prep and merge ImageCollections for requested platforms
+        self.images = ee.ImageCollection([])
+        for platform in self.platforms:
+            config = self.platform_configs[platform]
+            col = (
+                ee.ImageCollection(config["sr"])
+                .filter('WRS_ROW < 122')                       # remove nighttime images
+                .filterDate(self.start_date, self.end_date)
+                .linkCollection(                               # join thermal band from TOA ee.ImageCollection
+                    ee.ImageCollection(config["toa"]),
+                    linkedBands=config["thermal_band"]
+                )
+                .map(config["prep_function"])                  # mask low-quality pixels (and optionally rescale)
+            )
+            # If bands are specified, filter the ee.ImageCollection.
+            if self.bands is not None:
+                col = col.select(self.bands)
+            self.images = self.images.merge(col)
 
     @staticmethod
     def get_cloud_mask(image: ee.Image) -> ee.Image:
@@ -257,58 +296,58 @@ class LandsatSR:
         qa = image.select(['QA_PIXEL'])
         cloud_shadow_bit_mask = (1 << 3)
         cloud_bit_mask = (1 << 4)
-        return qa.bitwiseAnd(cloud_shadow_bit_mask).eq(0).And(qa.bitwiseAnd(cloud_bit_mask).eq(0))
+        return qa.bitwiseAnd(cloud_shadow_bit_mask).eq(0).And(
+            qa.bitwiseAnd(cloud_bit_mask).eq(0)
+        )
 
+    # Prep Landsat 4/5/7 with rescaling
     @staticmethod
     def prep_l47(image: ee.Image) -> ee.Image:
-        """Scale and mask clouds for L4/5/7 Collection 2 Surface Reflectance"""
-
-        # Scale bands
+        """Mask clouds, rename bands, and rescale optical bands by EE default (for L4/5/7)."""
         optical_bands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
-        # thermal_band = image.select('ST_B6').multiply(0.00341802).add(149.0)
-
-        # Replace thermal pixels with corresponding TOA values (SR missing over much of SSA)
         thermal_band = image.select('B6(_VCID_1)?')
-
         scaled = optical_bands.addBands(thermal_band).select(
             ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7', 'B6(_VCID_1)?'],
             ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
+        mask = LandsatSR.get_cloud_mask(image)
+        return image.select().addBands(scaled).updateMask(mask)
 
-        # Mask clouds and cloud-shadowed pixels
-        mask = LandsatSR.get_cloud_mask(image=image)
-
-        # Put the new bands back into the original image container and mask them.
-        return (
-            image.select()
-            .addBands(scaled)
-            .updateMask(mask)
+    # Prep Landsat 4/5/7 without rescaling
+    @staticmethod
+    def prep_l47_no_rescale(image: ee.Image) -> ee.Image:
+        """Mask clouds and rename bands without rescaling optical bands (for L4/5/7)."""
+        optical_bands = image.select('SR_B.')
+        thermal_band = image.select('B6(_VCID_1)?')
+        processed = optical_bands.addBands(thermal_band).select(
+            ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7', 'B6(_VCID_1)?'],
+            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
+        mask = LandsatSR.get_cloud_mask(image)
+        return image.select().addBands(processed).updateMask(mask)
 
+    # Prep Landsat 8/9 with rescaling
     @staticmethod
     def prep_l89(image: ee.Image) -> ee.Image:
-
-        """Scale and mask clouds for L8/9 Collection 2 Surface Reflectance"""
-
-        # Scale bands
+        """Mask clouds, rename bands, and rescale optical bands by EE default (for L8/9)."""
         optical_bands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
-        # thermal_band = image.select('ST_B10').multiply(0.00341802).add(149.0)
-
-        # Replace thermal pixels with corresponding TOA values (SR missing over much of SSA)
         thermal_band = image.select('B10')
-
-        # Insert the scaled bands back into the original image container.
         scaled = optical_bands.addBands(thermal_band).select(
             ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'B10'],
-            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1'],
+            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
+        mask = LandsatSR.get_cloud_mask(image)
+        return image.select().addBands(scaled).updateMask(mask)
 
-        # Mask clouds and cloud-shadowed pixels
-        mask = LandsatSR.get_cloud_mask(image=image)
-
-        # Put the new bands back into the original image container and mask them.
-        return (
-            image.select()
-            .addBands(scaled)
-            .updateMask(mask)
+    # Processing function for Landsat 8/9 without rescaling
+    @staticmethod
+    def prep_l89_no_rescale(image: ee.Image) -> ee.Image:
+        """Mask clouds and rename bands without rescaling optical bands (for L8/9)."""
+        optical_bands = image.select('SR_B.')
+        thermal_band = image.select('B10')
+        processed = optical_bands.addBands(thermal_band).select(
+            ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'B10'],
+            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
+        mask = LandsatSR.get_cloud_mask(image)
+        return image.select().addBands(processed).updateMask(mask)
