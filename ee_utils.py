@@ -81,7 +81,7 @@ def get_patch(image: ee.Image,
               add_y_offset: int = 0,
               file_format: str = "NUMPY_NDARRAY"):
     """Get a patch centered on the coordinates (defaults to a structured numpy array).
-    NOTE: Coords expects [lon, lat] with coordinate values in WGS84."""
+    NOTE: pt expects [lon, lat] with coordinate values in WGS84."""
 
     if crs_epsg is None:
         crs_epsg = get_utm_epsg(pt)
@@ -217,7 +217,7 @@ class LandsatSR:
             end_date (str): String representation of end date.
             bands (list[str]): Optional list of bands to select.
             platforms (list[str]): Optional list of Landsat platforms (e.g. ["LANDSAT_8", "LANDSAT_9"]).
-            rescale_bands (bool): If true, rescales Landsat bands by EE defaults.
+            rescale_bands (bool): If true, rescales Landsat bands by USGS recommended values.
         """
         self.start_date = start_date
         self.end_date = end_date
