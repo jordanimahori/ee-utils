@@ -10,9 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def get_utm_epsg(pt: Tuple[float, float]) -> Optional[str]:
-    """
-    Determine the UTM EPSG code for a given lon, lat pair in WGS84.
-    """
+    """Determine the UTM EPSG code for a given lon, lat pair in WGS84."""
     lon, lat = pt
     assert (-180 <= lon <= 180 and -80 <= lat <= 84),  "UTM only defined for latitudes between -80 and 84 degrees"
 
@@ -23,9 +21,7 @@ def get_utm_epsg(pt: Tuple[float, float]) -> Optional[str]:
 
 
 def wgs84_to_utm(pt: tuple[float, float], crs_epsg: str) -> tuple[float, float]:
-    """
-    Convert latitude and longitude to UTM coordinates in the requested zone.
-    """
+    """Convert latitude and longitude to UTM coordinates in the requested zone."""
     transformer = Transformer.from_crs(crs_from="epsg:4326", crs_to=crs_epsg, always_xy=True)
     return transformer.transform(*pt)
 
@@ -36,11 +32,9 @@ def preview_patch(image: ee.Image,
                   scale: int = 10,
                   patch_size=256
                   ):
-    """
-    Gets URL for an image at designated point, with defaults for Sentinel 1 images.
-    """
+    """Gets URL for an image at designated point, with defaults for Sentinel 1 images."""
 
-    # Get Vis Params
+    # Get vis params
     param_dict = {
         'sentinel1': [{'bands': ['VV'], 'min': -15, 'max': 0,}, "grey"],
     }
