@@ -3,13 +3,12 @@ import numpy as np
 import requests
 from matplotlib import pyplot as plt
 from pyproj import Transformer
-from typing import Union, Tuple, Optional
 from io import BytesIO
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 
 
-def get_utm_epsg(pt: Tuple[float, float]) -> Optional[str]:
+def get_utm_epsg(pt: tuple[float, float]) -> str:
     """Determine the UTM EPSG code for a given lon, lat pair in WGS84."""
     lon, lat = pt
     assert (-180 <= lon <= 180 and -80 <= lat <= 84),  "UTM only defined for latitudes between -80 and 84 degrees"
@@ -68,8 +67,8 @@ def preview_patch(image: ee.Image,
 
 def get_patch(image: ee.Image,
               pt: tuple[float, float],
-              scale: Union[int, tuple[int, int]],
-              crs_epsg: str = None,
+              scale: int | tuple[int, int],
+              crs_epsg: str | None = None,
               patch_size: int = 256,
               add_x_offset: int = 0,
               add_y_offset: int = 0,
@@ -154,12 +153,13 @@ def get_neighbourhood(image: ee.Image,
     return dict(results)
 
 
-def plot_neighbourhood(patches: Union[np.ndarray, dict],
+def plot_neighbourhood(patches: np.ndarray | dict,
                        levels: int,
-                       bands: Union[str, list],
+                       bands: str | list[str],
                        vis_min: float,
                        vis_max: float,
-                       **kwargs):
+                       **kwargs
+                       ) -> None:
     if isinstance(bands, str):
         bands = [bands]
     assert len(bands) in [1, 3], "Visualisation only possible for 1 or 3 bands"
@@ -203,15 +203,19 @@ def plot_neighbourhood(patches: Union[np.ndarray, dict],
 
 
 class LandsatSR:
-    def __init__(self, start_date: str, end_date: str, bands: list[str] = None,
-                 platforms: list[str] = None, rescale_bands: bool = True) -> None:
+    def __init__(self, start_date: str,
+                 end_date: str,
+                 bands: list[str] | None = None,
+                 platforms: list[str] | None = None,
+                 rescale_bands: bool = True
+                 ) -> None:
         """
         Args:
-            start_date (str): String representation of start date.
-            end_date (str): String representation of end date.
-            bands (list[str]): Optional list of bands to select.
-            platforms (list[str]): Optional list of Landsat platforms (e.g. ["LANDSAT_8", "LANDSAT_9"]).
-            rescale_bands (bool): If true, rescales Landsat bands by USGS recommended values.
+            start_date: String representation of start date.
+            end_date: String representation of end date.
+            bands (Optional): List of bands to select.
+            platforms (Optional): List of Landsat platforms (e.g. ["LANDSAT_8", "LANDSAT_9"]).
+            rescale_bands: If true, rescales Landsat bands by USGS recommended values.
         """
         self.start_date = start_date
         self.end_date = end_date
