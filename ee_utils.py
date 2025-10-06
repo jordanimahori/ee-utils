@@ -1,6 +1,4 @@
-import ee
-import numpy as np
-import requests
+import ee, requests, numpy as np
 from matplotlib import pyplot as plt
 from pyproj import Transformer
 from io import BytesIO
@@ -8,61 +6,20 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 
 
-def get_utm_epsg(pt: tuple[float, float]) -> str:
+def get_utm_epsg(pt):
     """Determine the UTM EPSG code for a given lon, lat pair in WGS84."""
     lon, lat = pt
     assert (-180 <= lon <= 180 and -80 <= lat <= 84),  "UTM only defined for latitudes between -80 and 84 degrees"
-
-    utm_zone = int((lon + 180) / 6) + 1                               # UTM zone number (ignoring Svalbaard)
-    epsg_code = 32600 + utm_zone if lat >= 0 else 32700 + utm_zone    # 326xx for SH and 327xx for NH
-
+    lon = 179.999999 if lon == 180 else lon                            # avoid zone=61 at the antimeridian
+    utm_zone = int((lon + 180) // 6) + 1                               # UTM zone number (ignoring Svalbaard)
+    epsg_code = 32600 + utm_zone if lat >= 0 else 32700 + utm_zone     # 326xx for NH and 327xx for SH
     return f"EPSG:{epsg_code}"
 
 
 def wgs84_to_utm(pt: tuple[float, float], crs_epsg: str) -> tuple[float, float]:
-    """Convert latitude and longitude to UTM coordinates in the requested zone."""
+    """“Convert lon, lat (WGS84) to UTM coordinates in the requested zone."""
     transformer = Transformer.from_crs(crs_from="epsg:4326", crs_to=crs_epsg, always_xy=True)
     return transformer.transform(*pt)
-
-
-def preview_patch(image: ee.Image,
-                  pt: tuple[float, float],
-                  preset: str,
-                  scale: int = 10,
-                  patch_size=256
-                  ):
-    """Gets URL for an image at designated point, with defaults for Sentinel 1 images."""
-
-    # Get vis params
-    param_dict = {
-        'sentinel1': [{'bands': ['VV'], 'min': -15, 'max': 0,}, "grey"],
-    }
-    assert preset.lower() in ["sentinel1"]
-    vis_params, cmap = param_dict[preset.lower()]
-
-    pt = ee.Geometry.Point(pt)
-    region = pt.buffer((patch_size/2)*scale).bounds()
-
-    url = image.getThumbURL({
-        'region': region,
-        'dimensions': f'{patch_size}x{patch_size}',
-        'format': 'png',
-        'min': vis_params['min'],
-        'max': vis_params['max'],
-        'bands': vis_params['bands']
-    })
-
-    # Fetch the image from the URL
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise ValueError("Failed to retrieve image.")
-
-    # Convert to image and display
-    img = Image.open(BytesIO(response.content))
-    plt.figure(figsize=(6, 6))
-    plt.imshow(img, cmap='gray')
-    plt.axis('off')
-    plt.show()
 
 
 def get_patch(image: ee.Image,
@@ -73,57 +30,38 @@ def get_patch(image: ee.Image,
               add_x_offset: int = 0,
               add_y_offset: int = 0,
               file_format: str = "NUMPY_NDARRAY"):
-    """Get a patch centered on the coordinates (defaults to a structured numpy array).
-    NOTE: pt expects [lon, lat] with coordinate values in WGS84."""
 
+    # Get patch center in CRS coords
     if crs_epsg is None:
         crs_epsg = get_utm_epsg(pt)
+    centroid = wgs84_to_utm(pt, crs_epsg=crs_epsg)
 
-    # Unpack scale
+    # scale unpack
     if isinstance(scale, int):
         scale_x, scale_y = scale, -scale
-    elif len(scale) == 2:
+    elif isinstance(scale, tuple) and len(scale) == 2:
         scale_x, scale_y = scale[0], -scale[1]
-        assert isinstance(scale_x, int) and isinstance(scale_y, int), "Scale values must be integers"
+        assert isinstance(scale_x, int) and isinstance(scale_y, int)
     else:
         raise TypeError("Scale must be an integer or tuple of two integers")
+    assert scale_x > 0 > scale_y
 
-    # Check that export params are valid
-    if not isinstance(image, ee.Image):
-        raise TypeError("Input image must be an ee.Image object")
+    # Get translation for patch center
+    tx = centroid[0] - scale_x * (patch_size/2) + scale_x * add_x_offset
+    ty = centroid[1] - scale_y * (patch_size/2) + -scale_y * add_y_offset
 
-    assert scale_x > 0 > scale_y, "Scale values must be positive integers"
-
-    # Convert WGS84 to UTM
-    centroid = wgs84_to_utm(pt, crs_epsg=crs_epsg)
-    if centroid is None:
-        raise ValueError("UTM conversion failed. Check the coordinate system.")
-
-    # Offset to the upper left corner + any additional offset requested
-    offset_x = -scale_x * (patch_size/2) + scale_x * add_x_offset    # move top-left corner right to align centroid
-    offset_y = -scale_y * (patch_size/2) + -scale_y * add_y_offset   # but scale_y is flipped so negate to move up
-
-    # Request template
     request = {
         'expression': image,
         'fileFormat': file_format,
         'grid': {
-            'dimensions': {
-                'width': patch_size,
-                'height': patch_size
-            },
+            'dimensions': {'width': patch_size, 'height': patch_size},
             'affineTransform': {
-                'scaleX': scale_x,
-                'shearX': 0,
-                'translateX': centroid[0] + offset_x,
-                'scaleY': scale_y,
-                'shearY': 0,
-                'translateY': centroid[1] + offset_y
+                'scaleX': scale_x, 'shearX': 0, 'translateX': tx,
+                'shearY': 0,      'scaleY': scale_y, 'translateY': ty
             },
             'crsCode': crs_epsg
         }
     }
-
     try:
         return ee.data.computePixels(request)
     except Exception as e:
@@ -153,7 +91,7 @@ def get_neighbourhood(image: ee.Image,
     return dict(results)
 
 
-def plot_neighbourhood(patches: np.ndarray | dict,
+def plot_neighbourhood(patches: dict[tuple[int,int], np.ndarray|dict],
                        levels: int,
                        bands: str | list[str],
                        vis_min: float,
@@ -188,6 +126,9 @@ def plot_neighbourhood(patches: np.ndarray | dict,
             # Normalize
             display_array = (np.clip(display_array, vis_min, vis_max) - vis_min)/(vis_max - vis_min)
 
+            if len(bands) == 1:
+                display_array = display_array[..., 0]
+
             # Assign to i,j subplot
             if levels == 0:
                 axs.imshow(display_array, vmin=0, vmax=1, **kwargs)
@@ -199,6 +140,43 @@ def plot_neighbourhood(patches: np.ndarray | dict,
                 axs[-y + levels, x + levels].set_xticks([])
                 axs[-y + levels, x + levels].set_yticks([])
 
+    plt.show()
+
+
+def preview_patch(image: ee.Image,
+                  pt: tuple[float, float],
+                  preset: str,
+                  scale: int,
+                  patch_size=256):
+    """PNG preview centered at pt."""
+    param_dict = {
+        'sentinel1': [{'bands': ['VV'], 'min': -15, 'max': 0}, 'gray'],
+        'sentinel2': [{'bands': ['B4','B3','B2'],'min': 0.0, 'max': 0.3}, 'rgb'],
+        'landsat': [{'bands': ['BLUE','GREEN','RED'], 'min': 0, 'max': 0.4}, 'rgb'],
+    }
+    preset = preset.lower()
+    assert preset in param_dict, f"Unknown preset: {preset}"
+    vis_params, _ = param_dict[preset]
+
+    pt_geom = ee.Geometry.Point(pt)
+    region = pt_geom.buffer((patch_size/2)*scale).bounds()
+
+    url = image.getThumbURL({
+        'region': region,
+        'dimensions': f'{patch_size}x{patch_size}',
+        'format': 'png',
+        'min': vis_params['min'],
+        'max': vis_params['max'],
+        'bands': vis_params['bands']
+    })
+
+    r = requests.get(url)
+    if r.status_code != 200:
+        raise ValueError("Failed to retrieve image.")
+    img = Image.open(BytesIO(r.content))
+    plt.figure(figsize=(6, 6))
+    plt.imshow(img)
+    plt.axis('off')
     plt.show()
 
 
@@ -275,11 +253,10 @@ class LandsatSR:
             config = self.platform_configs[platform]
             col = (
                 ee.ImageCollection(config["sr"])
-                .filter('WRS_ROW < 122')                       # remove nighttime images
                 .filterDate(self.start_date, self.end_date)
                 .linkCollection(                               # join thermal band from TOA ee.ImageCollection
                     ee.ImageCollection(config["toa"]),
-                    linkedBands=config["thermal_band"]
+                    linkedBands=[config["thermal_band"]]
                 )
                 .map(config["prep_function"])                  # mask low-quality pixels (and optionally rescale)
             )
@@ -292,8 +269,8 @@ class LandsatSR:
     def get_cloud_mask(image: ee.Image) -> ee.Image:
         """Get mask for non-cloudy pixels for a Landsat image based on QA_PIXEL."""
         qa = image.select(['QA_PIXEL'])
-        cloud_shadow_bit_mask = (1 << 3)
-        cloud_bit_mask = (1 << 4)
+        cloud_bit_mask = (1 << 3)
+        cloud_shadow_bit_mask = (1 << 4)
         return qa.bitwiseAnd(cloud_shadow_bit_mask).eq(0).And(
             qa.bitwiseAnd(cloud_bit_mask).eq(0)
         )
@@ -309,7 +286,7 @@ class LandsatSR:
             ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
         mask = LandsatSR.get_cloud_mask(image)
-        return image.select().addBands(scaled).updateMask(mask)
+        return image.select([]).addBands(scaled).updateMask(mask)
 
     # Prep Landsat 4/5/7 without rescaling
     @staticmethod
@@ -322,7 +299,7 @@ class LandsatSR:
             ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
         mask = LandsatSR.get_cloud_mask(image)
-        return image.select().addBands(processed).updateMask(mask)
+        return image.select([]).addBands(processed).updateMask(mask)
 
     # Prep Landsat 8/9 with rescaling
     @staticmethod
@@ -335,7 +312,7 @@ class LandsatSR:
             ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
         mask = LandsatSR.get_cloud_mask(image)
-        return image.select().addBands(scaled).updateMask(mask)
+        return image.select([]).addBands(scaled).updateMask(mask)
 
     # Processing function for Landsat 8/9 without rescaling
     @staticmethod
@@ -348,4 +325,71 @@ class LandsatSR:
             ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
         )
         mask = LandsatSR.get_cloud_mask(image)
-        return image.select().addBands(processed).updateMask(mask)
+        return image.select([]).addBands(processed).updateMask(mask)
+
+
+class Sentinel2SR:
+    def __init__(self,
+                 start_date: str,
+                 end_date: str,
+                 bands: list[str] | None = None,
+                 rescale: bool = True,
+                 qa_band: str = 'cs_cdf',          # 'cs' or 'cs_cdf'
+                 clear_threshold: float = 0.60,    # 0.50–0.65 generally good
+                 prefilter_cloud_pct: int | None = 80,
+                 keep_qa: bool = False):
+        """
+        Harmonized SR + Cloud Score+ masking.
+
+        - Collection: COPERNICUS/S2_SR_HARMONIZED (SR scaled by 1e4)
+        - Cloud mask: GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED (10 m)
+          linked by system:index, using qa_band >= clear_threshold.
+
+        Args:
+            bands: Optional band subset (after renaming); e.g. ['RED','GREEN','BLUE'].
+            rescale: Multiply reflectance by 1e-4 to get [0..1] floats.
+            qa_band: 'cs' or 'cs_cdf' (recommended: 'cs_cdf').
+            clear_threshold: keep pixels with qa_band >= this value.
+            prefilter_cloud_pct: optional pre-filter on CLOUDY_PIXEL_PERCENTAGE.
+            keep_qa: if True, retain the QA band in outputs for debugging.
+        """
+        self.start_date = start_date
+        self.end_date = end_date
+        self.bands = bands
+        self.rescale = rescale
+        self.qa_band = qa_band
+        self.clear_threshold = ee.Number(clear_threshold)
+        self.keep_qa = keep_qa
+
+        s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+              .filterDate(start_date, end_date))
+        if prefilter_cloud_pct is not None:
+            s2 = s2.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', prefilter_cloud_pct))
+
+        # Cloud Score+ (10 m), shares system:index; link the chosen QA band.
+        csplus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED')
+        s2 = s2.linkCollection(csplus, linkedBands=[qa_band])  # default matchPropertyName='system:index'
+
+        def _prep(img: ee.Image) -> ee.Image:
+            # Mask with Cloud Score+ threshold.
+            qa = img.select(self.qa_band)
+            img = img.updateMask(qa.gte(self.clear_threshold))
+
+            # Select optical bands.
+            optical = img.select(["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"])
+            if self.rescale:
+                optical = optical.multiply(1e-4)
+
+            out = img.select([]).addBands(optical)
+            if self.keep_qa:
+                out = out.addBands(qa)  # keep 'cs' or 'cs_cdf' for inspection
+
+            return out
+
+        ic = s2.map(_prep)
+        if self.bands is not None:
+            ic = ic.select(self.bands)
+
+        # Expose both names for convenience (matches your LandsatSR style).
+        self.images = ic
+        self.collection = ic
