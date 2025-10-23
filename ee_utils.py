@@ -214,36 +214,65 @@ class LandsatSR:
         if not self.platforms.issubset(self.available_platforms):
             raise ValueError(f"Platforms must be a subset of {self.available_platforms}")
 
+        # Prep Landsat 4/5/7 with rescaling
+        def _prep_l47(image: ee.Image) -> ee.Image:
+            """Mask clouds, rename bands, and rescale optical bands by EE default (for L4/5/7)."""
+            optical_bands = image.select('SR_B.')
+            if self.rescale_bands:
+                optical_bands = optical_bands.multiply(0.0000275).add(-0.2)
+            thermal_band = image.select('B6(_VCID_1)?')
+            scaled = optical_bands.addBands(thermal_band).select(
+                ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7', 'B6(_VCID_1)?'],
+                ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
+            )
+            mask = LandsatSR.get_cloud_mask(image)
+            return image.select([]).addBands(scaled).updateMask(mask)
+
+        # Prep Landsat 8/9 with rescaling
+        def _prep_l89(image: ee.Image) -> ee.Image:
+            """Mask clouds, rename bands, and rescale optical bands by EE default (for L8/9)."""
+            optical_bands = image.select('SR_B.')
+            if self.rescale_bands:
+                optical_bands = optical_bands.multiply(0.0000275).add(-0.2)
+            thermal_band = image.select('B10')
+            scaled = optical_bands.addBands(thermal_band).select(
+                ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'B10'],
+                ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
+            )
+            mask = LandsatSR.get_cloud_mask(image)
+            return image.select([]).addBands(scaled).updateMask(mask)
+
+
         self.platform_configs = {
             "LANDSAT_4": {
                 "sr": 'LANDSAT/LT04/C02/T1_L2',
                 "toa": 'LANDSAT/LT04/C02/T1_TOA',
                 "thermal_band": 'B6',
-                "prep_function": self.prep_l47 if self.rescale_bands else self.prep_l47_no_rescale,
+                "prep_function": _prep_l47
             },
             "LANDSAT_5": {
                 "sr": 'LANDSAT/LT05/C02/T1_L2',
                 "toa": 'LANDSAT/LT05/C02/T1_TOA',
                 "thermal_band": 'B6',
-                "prep_function": self.prep_l47 if self.rescale_bands else self.prep_l47_no_rescale,
+                "prep_function": _prep_l47
             },
             "LANDSAT_7": {
                 "sr": 'LANDSAT/LE07/C02/T1_L2',
                 "toa": 'LANDSAT/LE07/C02/T1_TOA',
                 "thermal_band": 'B6_VCID_1',
-                "prep_function": self.prep_l47 if self.rescale_bands else self.prep_l47_no_rescale,
+                "prep_function": _prep_l47
             },
             "LANDSAT_8": {
                 "sr": 'LANDSAT/LC08/C02/T1_L2',
                 "toa": 'LANDSAT/LC08/C02/T1_TOA',
                 "thermal_band": 'B10',
-                "prep_function": self.prep_l89 if self.rescale_bands else self.prep_l89_no_rescale,
+                "prep_function": _prep_l89
             },
             "LANDSAT_9": {
                 "sr": 'LANDSAT/LC09/C02/T1_L2',
                 "toa": 'LANDSAT/LC09/C02/T1_TOA',
                 "thermal_band": 'B10',
-                "prep_function": self.prep_l89 if self.rescale_bands else self.prep_l89_no_rescale,
+                "prep_function": _prep_l89
             },
         }
 
@@ -275,58 +304,6 @@ class LandsatSR:
             qa.bitwiseAnd(cloud_bit_mask).eq(0)
         )
 
-    # Prep Landsat 4/5/7 with rescaling
-    @staticmethod
-    def prep_l47(image: ee.Image) -> ee.Image:
-        """Mask clouds, rename bands, and rescale optical bands by EE default (for L4/5/7)."""
-        optical_bands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
-        thermal_band = image.select('B6(_VCID_1)?')
-        scaled = optical_bands.addBands(thermal_band).select(
-            ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7', 'B6(_VCID_1)?'],
-            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
-        )
-        mask = LandsatSR.get_cloud_mask(image)
-        return image.select([]).addBands(scaled).updateMask(mask)
-
-    # Prep Landsat 4/5/7 without rescaling
-    @staticmethod
-    def prep_l47_no_rescale(image: ee.Image) -> ee.Image:
-        """Mask clouds and rename bands without rescaling optical bands (for L4/5/7)."""
-        optical_bands = image.select('SR_B.')
-        thermal_band = image.select('B6(_VCID_1)?')
-        processed = optical_bands.addBands(thermal_band).select(
-            ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7', 'B6(_VCID_1)?'],
-            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
-        )
-        mask = LandsatSR.get_cloud_mask(image)
-        return image.select([]).addBands(processed).updateMask(mask)
-
-    # Prep Landsat 8/9 with rescaling
-    @staticmethod
-    def prep_l89(image: ee.Image) -> ee.Image:
-        """Mask clouds, rename bands, and rescale optical bands by EE default (for L8/9)."""
-        optical_bands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
-        thermal_band = image.select('B10')
-        scaled = optical_bands.addBands(thermal_band).select(
-            ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'B10'],
-            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
-        )
-        mask = LandsatSR.get_cloud_mask(image)
-        return image.select([]).addBands(scaled).updateMask(mask)
-
-    # Processing function for Landsat 8/9 without rescaling
-    @staticmethod
-    def prep_l89_no_rescale(image: ee.Image) -> ee.Image:
-        """Mask clouds and rename bands without rescaling optical bands (for L8/9)."""
-        optical_bands = image.select('SR_B.')
-        thermal_band = image.select('B10')
-        processed = optical_bands.addBands(thermal_band).select(
-            ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'B10'],
-            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
-        )
-        mask = LandsatSR.get_cloud_mask(image)
-        return image.select([]).addBands(processed).updateMask(mask)
-
 
 class Sentinel2SR:
     def __init__(self,
@@ -334,8 +311,8 @@ class Sentinel2SR:
                  end_date: str,
                  bands: list[str] | None = None,
                  rescale: bool = True,
-                 qa_band: str = 'cs_cdf',          # 'cs' or 'cs_cdf'
-                 clear_threshold: float = 0.60,    # 0.50–0.65 generally good
+                 qa_band: str = 'cs_cdf',
+                 clear_threshold: float = 0.60,
                  prefilter_cloud_pct: int | None = 80,
                  keep_qa: bool = False):
         """
@@ -368,7 +345,7 @@ class Sentinel2SR:
 
         # Cloud Score+ (10 m), shares system:index; link the chosen QA band.
         csplus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED')
-        s2 = s2.linkCollection(csplus, linkedBands=[qa_band])  # default matchPropertyName='system:index'
+        s2 = s2.linkCollection(csplus, linkedBands=[qa_band])
 
         def _prep(img: ee.Image) -> ee.Image:
             # Mask with Cloud Score+ threshold.
@@ -378,18 +355,16 @@ class Sentinel2SR:
             # Select optical bands.
             optical = img.select(["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"])
             if self.rescale:
-                optical = optical.multiply(1e-4)
+                optical = optical.toFloat().multiply(ee.Number(1e-4).float())
 
             out = img.select([]).addBands(optical)
             if self.keep_qa:
                 out = out.addBands(qa)  # keep 'cs' or 'cs_cdf' for inspection
-
             return out
 
         ic = s2.map(_prep)
         if self.bands is not None:
-            ic = ic.select(self.bands)
+            ic = ic.select(list(self.bands) + [self.qa_band]) if self.keep_qa else ic.select(self.bands)
 
-        # Expose both names for convenience (matches your LandsatSR style).
         self.images = ic
         self.collection = ic
