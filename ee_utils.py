@@ -4,6 +4,9 @@ from pyproj import Transformer
 from io import BytesIO
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from tqdm import tqdm
+import concurrent.futures
 
 
 def get_utm_epsg(pt):
@@ -178,6 +181,174 @@ def preview_patch(image: ee.Image,
     plt.imshow(img)
     plt.axis('off')
     plt.show()
+
+
+def write_dataset(image: ee.Image,
+                  locations: list[list[float, float]],
+                  location_ids: list[str],
+                  image_names: list[str],
+                  patch_size: int,
+                  scale: int,
+                  output_dir: str ,
+                  overwrite_patches: bool = True,
+                  concurrent_requests: int = 40,
+                  ) -> None:
+    """
+    Extract patches from Earth Engine and save as a GeoTIFF.
+
+    In case this runs too fast and some requests hit EarthEngine's API rate limits, re-run the export with
+    overwrite_patches = False to only download missing patches.
+    """
+
+    # Check inputs
+    assert len(locations) == len(location_ids)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Skip existing patches if names match
+    if overwrite_patches is False:
+        existing_patches = list(Path(output_dir).glob("*.tif"))
+        skip_ids = [pt_id for pt_id, img_name in zip(location_ids, image_names)
+                    if Path(output_dir).joinpath(img_name) in existing_patches]
+        # and return early if all IDs to be skipped
+        if len(skip_ids) == len(location_ids):
+            print("...all patches already exist.")
+            return None
+        if len(skip_ids) > 0:
+            print(f"...skipping {len(skip_ids)} existing patches.")
+    else:
+        skip_ids = []
+
+    future_to_point = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
+
+        # Submit jobs
+        for pt, pt_id, img_name in zip(locations, location_ids, image_names):
+            if pt_id not in skip_ids:
+                future = executor.submit(get_patch, image=image, pt=pt, scale=scale,
+                                         patch_size=patch_size, file_format='GEOTIFF')
+                future_to_point[future] = (pt_id, img_name)
+
+        # Write patches to disk when available
+        progbar = tqdm(total=len(future_to_point))
+        for future in concurrent.futures.as_completed(future_to_point):
+            pt_id, img_name = future_to_point[future]
+
+            try:
+                img = future.result()
+                filepath = Path(output_dir).joinpath(img_name)
+                with open(filepath, 'wb') as writer:
+                    writer.write(img)
+
+            except Exception as e:
+                print(e)
+
+            finally:
+                # remove patch from dict to minimise memory utilisation
+                future_to_point.pop(future)
+                progbar.update(1)
+
+        progbar.close()
+
+
+def prefix_bands(img, prefix):
+    new_names = img.bandNames().map(lambda b: ee.String(prefix).cat(ee.String(b)))
+    return img.rename(new_names)
+
+
+class SpatialCovariates:
+
+    # Earliest and latest available data for each ImageCollection
+    TERRACLIMATE_START, TERRACLIMATE_END = 1958, 2024  # for "IDAHO_EPSCOR/TERRACLIMATE"
+    GHS_START, GHS_END = 1975, 2030  # for "JRC/GHSL/P2023A/GHS_POP"; 'JRC/GHSL/P2023A/GHS_BUILT_S' -- (only every five years)
+    VIIRS_START, VIIRS_END = 2012, 2024  # for "NASA/VIIRS/002/VNP46A2"
+    CHIRPS_START, CHIRPS_END = 1981, 2025  # for "UCSB-CHG/CHIRPS/PENTAD"
+    DYNWORLD_START, DYNWORLD_END = 2016, 2025  # for "GOOGLE/DYNAMICWORLD/V1"; 2016 is the first full year of data
+
+    def __init__(self, year: int,
+                 landcover_scale: int = 100,
+                 nodata_val: int = -9999,
+                 max_pixels: int = 64,
+                 best_effort: bool = True):
+        self.year = year
+        self.cov_years = {
+            "terraclimate": int(np.clip(self.year, self.TERRACLIMATE_START, self.TERRACLIMATE_END)),
+            "ghs": int(np.clip((self.year // 5) * 5, self.GHS_START, self.GHS_END)),        # GHS only available every five years
+            "viirs": int(np.clip(self.year, self.VIIRS_START, self.VIIRS_END)),
+            "chirps": int(np.clip(self.year, self.CHIRPS_START, self.CHIRPS_END)),
+            "dynworld": int(np.clip(self.year, self.DYNWORLD_START, self.DYNWORLD_END))
+        }
+        self.landcover_scale = landcover_scale
+        self.nodata_val = nodata_val
+        self.max_pixels = max_pixels
+        self.best_effort = best_effort
+
+        # --- Load ImageCollections ---
+        terraclimate = ee.ImageCollection("IDAHO_EPSCOR/TERRACLIMATE").filterDate(f"{self.cov_years['terraclimate']}",f"{self.cov_years['terraclimate'] + 1}").select(["tmmx", "tmmn"])
+        ghs_built_surfaces = ee.ImageCollection("JRC/GHSL/P2023A/GHS_BUILT_S").filterDate(f"{self.cov_years['ghs']}",f"{self.cov_years['ghs'] + 1}")
+        ghs_population = ee.ImageCollection("JRC/GHSL/P2023A/GHS_POP").filterDate(f"{self.cov_years['ghs']}",f"{self.cov_years['ghs'] + 1}")
+        viirs_nightlights = ee.ImageCollection("NASA/VIIRS/002/VNP46A2").filterDate(f"{self.cov_years['viirs']}",f"{self.cov_years['viirs'] + 1}").select(["DNB_BRDF_Corrected_NTL"], ["viirs"])
+        precipitation = ee.ImageCollection("UCSB-CHG/CHIRPS/PENTAD").filterDate(f"{self.cov_years['chirps']}",f"{self.cov_years['chirps'] + 1}")
+        land_cover = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterDate(f"{self.cov_years['dynworld']}",f"{self.cov_years['dynworld'] + 1}")
+
+        # --- Create Annual Composite Images ---
+        # Note: We use ee.Image.reduceResolution to control downsampling; sum for extensive and mean for intensive quantities.
+        #       We need a reference proj for .reduceResolution so we know which of the pixels from our temporal composite image
+        #       (which may have different projections) fall within each cell in the requested grid. For global compatibility,
+        #       we use EPSG:4326 if no IC-wide proj is available, but note that this has some implications for weighting of the final composite.
+
+        # Reference Proj for Composites
+        tc_default = terraclimate.first().projection()
+        viirs_default = viirs_nightlights.first().projection()
+        precip_default = precipitation.first().projection()
+        lc_default = ee.Projection('EPSG:4326').atScale(self.landcover_scale)    # WGS84; DW otherwise has varying UTM projs
+
+        # Reduce using mean, max, min, and stdDev
+        reducer_multi = ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True).combine(ee.Reducer.min(), sharedInputs=True).combine(ee.Reducer.stdDev(), sharedInputs=True)
+
+        # Precipitation
+        self.precip_comp = (precipitation
+                            .reduce(reducer=reducer_multi)
+                            .setDefaultProjection(precip_default)
+                            .reduceResolution(reducer=ee.Reducer.mean(), maxPixels=self.max_pixels, bestEffort=self.best_effort)
+                            .unmask(self.nodata_val))
+
+        # Land Cover (Dynamic World)
+        landcover_prob_comp = (land_cover
+                               .select(['water', 'trees', 'grass', 'flooded_vegetation', 'crops', 'shrub_and_scrub', 'built', 'bare', 'snow_and_ice'])
+                               .mean()
+                               .setDefaultProjection(lc_default)
+                               .reduceResolution(reducer=ee.Reducer.mean(), maxPixels=self.max_pixels, bestEffort=self.best_effort)
+                               .unmask(self.nodata_val))
+        self.landcover_comp = prefix_bands(landcover_prob_comp, "lulc_prob_")
+
+        # Nightlights (VIIRS)
+        self.nightlights_comp = (viirs_nightlights
+                                 .reduce(reducer=reducer_multi)
+                                 .setDefaultProjection(viirs_default)
+                                 .reduceResolution(reducer=ee.Reducer.mean(), maxPixels=self.max_pixels, bestEffort=self.best_effort)
+                                 .unmask(self.nodata_val))
+
+        # Global Human Settlements
+        pop_comp = ghs_population.first().reduceResolution(reducer=ee.Reducer.sum(), maxPixels=self.max_pixels, bestEffort=self.best_effort).unmask(self.nodata_val)
+        settlement_comp = ghs_built_surfaces.first().reduceResolution(reducer=ee.Reducer.sum(), maxPixels=self.max_pixels, bestEffort=self.best_effort).unmask(self.nodata_val)
+        self.ghs_comp = ee.Image.cat([pop_comp, settlement_comp])
+
+        # Terraclimate
+        self.terraclimate_comp = (terraclimate
+                                  .reduce(reducer=reducer_multi)
+                                  .setDefaultProjection(tc_default)
+                                  .reduceResolution(reducer=ee.Reducer.mean(), maxPixels=self.max_pixels, bestEffort=self.best_effort)
+                                  .unmask(self.nodata_val))
+
+        # Soil PH (static image)
+        self.soil_ph_comp = (ee.Image("OpenLandMap/SOL/SOL_PH-H2O_USDA-4C1A2A_M/v02")
+                             .select("b0")
+                             .reduceResolution(reducer=ee.Reducer.mean(), maxPixels=self.max_pixels, bestEffort=self.best_effort)
+                             .unmask(self.nodata_val))
+
+        # Store Composite Images
+        self.all_covariates_comp = ee.Image.cat([self.landcover_comp, self.nightlights_comp, self.ghs_comp,
+                                                 self.terraclimate_comp, self.precip_comp, self.soil_ph_comp]).toFloat()
 
 
 class LandsatSR:
