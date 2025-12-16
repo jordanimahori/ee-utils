@@ -35,14 +35,17 @@ def get_patch(image: ee.Image,
               add_y_offset: int = 0,
               file_format: str = "NUMPY_NDARRAY"):
 
-    # Get patch center in UTM coords; assume WGS84 if none supplied
+    # Get patch center in UTM coords for zone corresponding to supplied pt
     if patch_crs is None:
         assert pt_crs.lower() == "epsg:4326"
         patch_crs = get_utm_epsg(pt)
         centroid = wgs84_to_utm(pt, crs_epsg=patch_crs)
     elif re.fullmatch(r"(?:epsg:)?(326|327)\d{2}", patch_crs.lower()):
-        assert pt_crs.lower() == patch_crs.lower()
-        centroid = pt
+        if pt_crs.lower() == "epsg:4326":                        # case 1: convert WGS84 to corresponding UTM
+            centroid = wgs84_to_utm(pt, crs_epsg=patch_crs)
+        else:                                                    # case 2: pt already in correct UTM
+            assert pt_crs.lower() == patch_crs.lower()
+            centroid = pt
     else:
         raise NotImplementedError
 
