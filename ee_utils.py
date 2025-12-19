@@ -265,8 +265,7 @@ def extract_spatial_covariates(image: ee.Image,
                                patch_scale: int,
                                patch_crs: str | None = None,
                                pt_crs: str = "EPSG:4326",
-                               concurrent_requests: int = 40,
-                               **kwargs
+                               concurrent_requests: int = 40
                                ) -> pd.DataFrame:
     """
     Extract average covariate values for a list of points and save as a Pandas DataFrame.
@@ -280,37 +279,37 @@ def extract_spatial_covariates(image: ee.Image,
     future_to_point = {}
     patch_dfs = []
     errors = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
+    with tqdm(total=len(pts)) as progbar:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
 
-        # Submit jobs
-        for pt, pt_id in zip(pts, patch_ids):
-                future = executor.submit(get_patch, image=image, pt=pt, pt_crs=pt_crs, patch_scale=patch_scale,
-                                         patch_size=1, patch_crs=patch_crs, **kwargs)
-                future_to_point[future] = pt_id
+            # Submit jobs
+            for pt, pt_id in zip(pts, patch_ids):
+                    future = executor.submit(get_patch, image=image, pt=pt, pt_crs=pt_crs, patch_scale=patch_scale,
+                                             patch_size=1, patch_crs=patch_crs)
+                    future_to_point[future] = pt_id
 
-        # Write patches to disk when available
-        progbar = tqdm(total=len(future_to_point))
-        for future in concurrent.futures.as_completed(future_to_point):
-            pt_id = future_to_point[future]
+            # Write patches to disk when available
+            for future in concurrent.futures.as_completed(future_to_point):
+                pt_id = future_to_point[future]
+                try:
+                    img = future.result()
+                    df =  pd.DataFrame.from_records(img.reshape(-1))
+                    df["patch_id"] = pt_id
+                    patch_dfs.append(df)
 
-            try:
-                img = future.result()
-                df = pd.DataFrame(img.reshape(-1))
-                df["dhs_id"] = pt_id
-                patch_dfs.append(df)
+                except Exception as e:
+                    errors.append((pt_id, e))
 
-            except Exception as e:
-                print(f"Encountered error for {pt_id}:")
-                errors.append(pt_id)
-                print(e)
+                finally:
+                    future_to_point.pop(future)
+                    progbar.update()
 
-            finally:
-                future_to_point.pop(future)
-                progbar.update(1)
-
-        progbar.close()
-
-    return pd.concat(patch_dfs), errors
+    if errors:
+        raise RuntimeError(
+            f"{len(errors)} patches failed. "
+            f"First error: {errors[0][0]} → {repr(errors[0][1])}"
+        )
+    return pd.concat(patch_dfs)
 
 
 
@@ -406,7 +405,7 @@ class SpatialCovariates:
 
         # Soil PH (static image)
         self.soil_ph_comp = (ee.Image("OpenLandMap/SOL/SOL_PH-H2O_USDA-4C1A2A_M/v02")
-                             .select("b0")
+                             .select(["b0"], ["soil_ph_0cm"])
                              .reduceResolution(reducer=ee.Reducer.mean(), maxPixels=self.max_pixels, bestEffort=self.best_effort)
                              .unmask(self.nodata_val))
 
