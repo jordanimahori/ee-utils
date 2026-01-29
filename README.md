@@ -43,13 +43,12 @@ src/ee_utils/
 
 The following examples demonstrate the core functionality of the package.
 
-
 ```python
 import ee
 import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
-from ee_utils import LandsatSR, get_neighbourhood, plot_neighbourhood, get_utm_epsg, extract_patches, get_patch
+from eeutils import LandsatSR, get_neighbourhood, plot_neighbourhood, get_utm_epsg, extract_patches, get_patch
 ```
 
 
@@ -226,7 +225,7 @@ patch[1, 0:10, 0:10]  # print 10x10 pixel extract
 The `Sentinel2SR` class provides similar functionality for Sentinel-2 imagery with Cloud Score+ masking:
 
 ```python
-from ee_utils import Sentinel2SR
+from eeutils import Sentinel2SR
 
 s2 = Sentinel2SR(
     start_date="2024-01-01",
@@ -249,7 +248,7 @@ The `SpatialCovariates` class and `extract_spatial_covariates()` function enable
 - **OpenLandMap**: Soil pH
 
 ```python
-from ee_utils import SpatialCovariates, extract_spatial_covariates
+from eeutils import SpatialCovariates, extract_spatial_covariates
 
 covariates = SpatialCovariates(year=2024)
 df = extract_spatial_covariates(

@@ -21,7 +21,9 @@ class SpatialCovariates:
     ):
         self.year = year
         self.cov_years = {
-            "terraclimate": int(np.clip(self.year, self.TERRACLIMATE_START, self.TERRACLIMATE_END)),
+            "terraclimate": int(
+                np.clip(self.year, self.TERRACLIMATE_START, self.TERRACLIMATE_END)
+            ),
             "ghs": int(np.clip((self.year // 5) * 5, self.GHS_START, self.GHS_END)),
             "viirs": int(np.clip(self.year, self.VIIRS_START, self.VIIRS_END)),
             "chirps": int(np.clip(self.year, self.CHIRPS_START, self.CHIRPS_END)),
@@ -34,29 +36,28 @@ class SpatialCovariates:
 
         terraclimate = (
             ee.ImageCollection("IDAHO_EPSCOR/TERRACLIMATE")
-            .filterDate(f"{self.cov_years['terraclimate']}", f"{self.cov_years['terraclimate'] + 1}")
+            .filterDate(
+                f"{self.cov_years['terraclimate']}",
+                f"{self.cov_years['terraclimate'] + 1}",
+            )
             .select(["tmmx", "tmmn"])
         )
-        ghs_built_surfaces = (
-            ee.ImageCollection("JRC/GHSL/P2023A/GHS_BUILT_S")
-            .filterDate(f"{self.cov_years['ghs']}", f"{self.cov_years['ghs'] + 1}")
-        )
-        ghs_population = (
-            ee.ImageCollection("JRC/GHSL/P2023A/GHS_POP")
-            .filterDate(f"{self.cov_years['ghs']}", f"{self.cov_years['ghs'] + 1}")
+        ghs_built_surfaces = ee.ImageCollection(
+            "JRC/GHSL/P2023A/GHS_BUILT_S"
+        ).filterDate(f"{self.cov_years['ghs']}", f"{self.cov_years['ghs'] + 1}")
+        ghs_population = ee.ImageCollection("JRC/GHSL/P2023A/GHS_POP").filterDate(
+            f"{self.cov_years['ghs']}", f"{self.cov_years['ghs'] + 1}"
         )
         viirs_nightlights = (
             ee.ImageCollection("NASA/VIIRS/002/VNP46A2")
             .filterDate(f"{self.cov_years['viirs']}", f"{self.cov_years['viirs'] + 1}")
             .select(["DNB_BRDF_Corrected_NTL"], ["viirs"])
         )
-        precipitation = (
-            ee.ImageCollection("UCSB-CHG/CHIRPS/PENTAD")
-            .filterDate(f"{self.cov_years['chirps']}", f"{self.cov_years['chirps'] + 1}")
+        precipitation = ee.ImageCollection("UCSB-CHG/CHIRPS/PENTAD").filterDate(
+            f"{self.cov_years['chirps']}", f"{self.cov_years['chirps'] + 1}"
         )
-        land_cover = (
-            ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
-            .filterDate(f"{self.cov_years['dynworld']}", f"{self.cov_years['dynworld'] + 1}")
+        land_cover = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1").filterDate(
+            f"{self.cov_years['dynworld']}", f"{self.cov_years['dynworld'] + 1}"
         )
 
         tc_default = terraclimate.first().projection()
@@ -83,8 +84,19 @@ class SpatialCovariates:
         )
 
         landcover_prob_comp = (
-            land_cover.select(["water", "trees", "grass", "flooded_vegetation", "crops",
-                               "shrub_and_scrub", "built", "bare", "snow_and_ice"])
+            land_cover.select(
+                [
+                    "water",
+                    "trees",
+                    "grass",
+                    "flooded_vegetation",
+                    "crops",
+                    "shrub_and_scrub",
+                    "built",
+                    "bare",
+                    "snow_and_ice",
+                ]
+            )
             .mean()
             .setDefaultProjection(lc_default)
             .reduceResolution(
@@ -149,18 +161,16 @@ class SpatialCovariates:
             .unmask(self.nodata_val)
         )
 
-        self.all_covariates_comp = (
-            ee.Image.cat(
-                [
-                    self.landcover_comp,
-                    self.nightlights_comp,
-                    self.ghs_comp,
-                    self.terraclimate_comp,
-                    self.precip_comp,
-                    self.soil_ph_comp,
-                ]
-            ).toFloat()
-        )
+        self.all_covariates_comp = ee.Image.cat(
+            [
+                self.landcover_comp,
+                self.nightlights_comp,
+                self.ghs_comp,
+                self.terraclimate_comp,
+                self.precip_comp,
+                self.soil_ph_comp,
+            ]
+        ).toFloat()
 
     @staticmethod
     def _prefix_bands(img, prefix):

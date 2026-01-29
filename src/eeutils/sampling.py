@@ -1,9 +1,11 @@
+import concurrent.futures
 import re
+from pathlib import Path
+
 import ee
 import pandas as pd
-import concurrent.futures
-from pathlib import Path
 from tqdm import tqdm
+
 from .geo import get_utm_epsg, wgs84_to_utm
 
 
@@ -11,23 +13,27 @@ def _validate_image_source(image: ee.Image | None, asset_id: str | None):
     if not (image is None) ^ (asset_id is None):
         raise ValueError("Must specify exactly one of image or asset_id")
 
+
 def _validate_pts(pts, patch_ids):
     if len(pts) != len(patch_ids) or len(patch_ids) != len(set(patch_ids)):
-        raise ValueError("pts and patch_ids must have the same length and contain unique elements")
+        raise ValueError(
+            "pts and patch_ids must have the same length and contain unique elements"
+        )
     for pt in pts:
         if not isinstance(pt, tuple) or len(pt) != 2:
             raise ValueError("pts must be a list of tuples (lon, lat)")
 
-def _build_ee_request(
-        pt: tuple[float, float],
-        pt_crs: str = "EPSG:4326",
-        patch_scale: int | tuple[int, int] = 30,
-        patch_crs: str | None = None,
-        patch_size: int = 256,
-        add_x_offset: int = 0,
-        add_y_offset: int = 0,
-        file_format: str = "NUMPY_NDARRAY"):
 
+def _build_ee_request(
+    pt: tuple[float, float],
+    pt_crs: str = "EPSG:4326",
+    patch_scale: int | tuple[int, int] = 30,
+    patch_crs: str | None = None,
+    patch_size: int = 256,
+    add_x_offset: int = 0,
+    add_y_offset: int = 0,
+    file_format: str = "NUMPY_NDARRAY",
+):
     # Map pt to UTM if necessary
     if patch_crs is None:
         if pt_crs.lower() != "epsg:4326":
@@ -39,7 +45,9 @@ def _build_ee_request(
             centroid = wgs84_to_utm(pt, crs_epsg=patch_crs)
         else:
             if pt_crs.lower() != patch_crs.lower():
-                raise ValueError("pt_crs must match patch_crs when coordinates are already UTM")
+                raise ValueError(
+                    "pt_crs must match patch_crs when coordinates are already UTM"
+                )
             centroid = pt
     else:
         raise ValueError("patch_crs must be None or a valid UTM EPSG code")
@@ -87,7 +95,7 @@ def get_patch(
     patch_size: int = 256,
     add_x_offset: int = 0,
     add_y_offset: int = 0,
-    file_format: str = "NUMPY_NDARRAY"
+    file_format: str = "NUMPY_NDARRAY",
 ):
     """Fetch a patch centered on pt."""
     request = _build_ee_request(
@@ -98,18 +106,18 @@ def get_patch(
         patch_size=patch_size,
         add_x_offset=add_x_offset,
         add_y_offset=add_y_offset,
-        file_format=file_format
+        file_format=file_format,
     )
 
     _validate_image_source(image, asset_id)
 
-    if image is not None:           # for computed images, use computePixels
+    if image is not None:  # for computed images, use computePixels
         request["expression"] = image
         try:
             return ee.data.computePixels(request)
         except Exception as exc:
             raise RuntimeError(f"Error fetching patch: {exc}") from exc
-    elif asset_id is not None:       # for non-computed images, use getPixels
+    elif asset_id is not None:  # for non-computed images, use getPixels
         request["assetId"] = asset_id
         try:
             return ee.data.getPixels(request)
@@ -129,10 +137,12 @@ def get_neighbourhood(
     patch_size: int = 256,
     levels: int = 2,
     file_format: str = "NUMPY_NDARRAY",
-    concurrent_requests = 20
+    concurrent_requests=20,
 ):
     """Fetch a square neighbourhood of patches around a point."""
-    offsets = [(x, y) for y in range(-levels, levels + 1) for x in range(-levels, levels + 1)]
+    offsets = [
+        (x, y) for y in range(-levels, levels + 1) for x in range(-levels, levels + 1)
+    ]
 
     _validate_image_source(image, asset_id)
 
@@ -154,7 +164,9 @@ def get_neighbourhood(
             ),
         )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=concurrent_requests
+    ) as executor:
         results = executor.map(fetch_patch, offsets)
 
     return dict(results)
@@ -197,8 +209,10 @@ def extract_patches(
         skip_ids = []
 
     future_to_point: dict[concurrent.futures.Future, str] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
-        for pt, pt_id in zip(pts, patch_ids):
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=concurrent_requests
+    ) as executor:
+        for pt, pt_id in zip(pts, patch_ids, strict=True):
             if pt_id not in skip_ids:
                 future = executor.submit(
                     get_patch,
@@ -258,8 +272,10 @@ def extract_spatial_covariates(
     patch_dfs: list[pd.DataFrame] = []
     errors: list[tuple[str, Exception]] = []
     with tqdm(total=len(pts)) as progbar:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
-            for pt, pt_id in zip(pts, patch_ids):
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrent_requests
+        ) as executor:
+            for pt, pt_id in zip(pts, patch_ids, strict=True):
                 future = executor.submit(
                     get_patch,
                     image=image,

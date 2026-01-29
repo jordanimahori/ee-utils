@@ -8,7 +8,11 @@ from PIL import Image
 
 
 def preview_patch(
-    image: ee.Image, pt: tuple[float, float], preset: str, scale: int, patch_size: int = 256
+    image: ee.Image,
+    pt: tuple[float, float],
+    preset: str,
+    scale: int,
+    patch_size: int = 256,
 ) -> None:
     """PNG preview centered at pt."""
     param_dict = {
@@ -24,14 +28,16 @@ def preview_patch(
     pt_geom = ee.Geometry.Point(pt)
     region = pt_geom.buffer((patch_size / 2) * scale).bounds()
 
-    url = image.getThumbURL({
-        "region": region,
-        "dimensions": f"{patch_size}x{patch_size}",
-        "format": "png",
-        "min": vis_params["min"],
-        "max": vis_params["max"],
-        "bands": vis_params["bands"],
-    })
+    url = image.getThumbURL(
+        {
+            "region": region,
+            "dimensions": f"{patch_size}x{patch_size}",
+            "format": "png",
+            "min": vis_params["min"],
+            "max": vis_params["max"],
+            "bands": vis_params["bands"],
+        }
+    )
 
     response = requests.get(url)
     if response.status_code != 200:
@@ -65,7 +71,6 @@ def plot_neighbourhood(
     for y in range(levels, -levels - 1, -1):
         # and each column
         for x in range(-levels, levels + 1):
-
             # Get x,y patch
             patch = patches[(x, y)]
 
@@ -75,9 +80,11 @@ def plot_neighbourhood(
             elif isinstance(patch, dict):
                 display_array = np.stack([patch[band].numpy() for band in bands], 2)
             else:
-                raise ValueError('supplied array is of an unsupported type')
+                raise ValueError("supplied array is of an unsupported type")
 
-            display_array = (np.clip(display_array, vis_min, vis_max) - vis_min) / (vis_max - vis_min)
+            display_array = (np.clip(display_array, vis_min, vis_max) - vis_min) / (
+                vis_max - vis_min
+            )
 
             if len(bands) == 1:
                 display_array = display_array[..., 0]
@@ -89,7 +96,9 @@ def plot_neighbourhood(
                 axs.set_yticks([])
 
             else:
-                axs[-y + levels, x + levels].imshow(display_array, vmin=0, vmax=1, **kwargs)
+                axs[-y + levels, x + levels].imshow(
+                    display_array, vmin=0, vmax=1, **kwargs
+                )
                 axs[-y + levels, x + levels].set_xticks([])
                 axs[-y + levels, x + levels].set_yticks([])
 
