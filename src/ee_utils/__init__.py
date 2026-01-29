@@ -1,5 +1,3 @@
-# src/ee_utils/__init__.py
-
 from .geo import get_utm_epsg, wgs84_to_utm
 from .sampling import get_patch, get_neighbourhood, extract_patches, extract_spatial_covariates
 from .viz import plot_neighbourhood, preview_patch
