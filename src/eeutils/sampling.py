@@ -1,11 +1,10 @@
-import concurrent.futures
 import re
-from pathlib import Path
-
 import ee
 import pandas as pd
+import concurrent.futures
+from os import PathLike
 from tqdm import tqdm
-
+from pathlib import Path
 from .geo import get_utm_epsg, wgs84_to_utm
 
 
@@ -171,17 +170,18 @@ def get_neighbourhood(
 
     return dict(results)
 
-
+## TODO: Handle patch prefix and overwrite_patches
 def extract_patches(
-    output_dir: str,
+    output_dir: str | PathLike,
     pts: list[tuple[float, float]],
     patch_ids: list[str],
     patch_size: int,
     patch_scale: int,
     image: ee.Image | None = None,
     asset_id: str | None = None,
-    patch_crs: str | None = None,
     pts_crs: str = "EPSG:4326",
+    patch_crs: str | None = None,
+    patch_prefix: str = "",
     overwrite_patches: bool = True,
     concurrent_requests: int = 40,
 ) -> None:
@@ -197,35 +197,37 @@ def extract_patches(
     _validate_pts(patch_ids=patch_ids, pts=pts)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
+    # If requested, skip same-named patches already in output_dir
+    existing_patches = set()
     if not overwrite_patches:
-        existing_names = {p.stem for p in Path(output_dir).glob("*.tif")}
-        skip_ids = [name for name in patch_ids if name in existing_names]
-        if len(skip_ids) == len(patch_ids):
-            print("...all patches already exist.")
-            return
-        if skip_ids:
-            print(f"...skipping {len(skip_ids)} existing patches.")
-    else:
-        skip_ids = []
+        existing_patches = {p.stem.removeprefix(patch_prefix) for p in Path(output_dir).glob("*.tif")}
+
+    to_process = [pid for pid in patch_ids if pid not in existing_patches]
+    skipped = len(patch_ids) - len(to_process)
+    pts_by_id = dict(zip(patch_ids, pts, strict=True))
+
+    if not to_process:
+        print("...all patches already exist.")
+        return
+
+    if skipped:
+        print(f"...skipping {skipped} existing patches.")
 
     future_to_point: dict[concurrent.futures.Future, str] = {}
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=concurrent_requests
-    ) as executor:
-        for pt, pt_id in zip(pts, patch_ids, strict=True):
-            if pt_id not in skip_ids:
-                future = executor.submit(
-                    get_patch,
-                    image=image,
-                    asset_id=asset_id,
-                    pt=pt,
-                    pt_crs=pts_crs,
-                    patch_scale=patch_scale,
-                    patch_size=patch_size,
-                    patch_crs=patch_crs,
-                    file_format="GEO_TIFF",
-                )
-                future_to_point[future] = pt_id
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_requests) as executor:
+        for pt_id in to_process:
+            future = executor.submit(
+                get_patch,
+                image=image,
+                asset_id=asset_id,
+                pt=pts_by_id[pt_id],
+                pt_crs=pts_crs,
+                patch_scale=patch_scale,
+                patch_size=patch_size,
+                patch_crs=patch_crs,
+                file_format="GEO_TIFF",
+            )
+            future_to_point[future] = pt_id
 
         progbar = tqdm(total=len(future_to_point))
         for future in concurrent.futures.as_completed(future_to_point):
@@ -233,11 +235,11 @@ def extract_patches(
 
             try:
                 img = future.result()
-                filepath = Path(output_dir).joinpath(f"{pt_id}.tif")
+                filepath = Path(output_dir).joinpath(f"{patch_prefix}{pt_id}.tif")
                 with open(filepath, "wb") as writer:
                     writer.write(img)
 
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(exc)
 
             finally:
@@ -305,6 +307,6 @@ def extract_spatial_covariates(
 
     if errors:
         raise RuntimeError(
-            f"{len(errors)} patches failed. First error: {errors[0][0]} → {errors[0][1]!r}"
+            f"{len(errors)} patches failed. First error: {errors[0][0]} {errors[0][1]!r}"
         )
     return pd.concat(patch_dfs)
