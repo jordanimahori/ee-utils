@@ -2,6 +2,7 @@ import re
 import ee
 import pandas as pd
 import concurrent.futures
+import warnings
 from os import PathLike
 from tqdm import tqdm
 from pathlib import Path
@@ -258,6 +259,7 @@ def extract_spatial_covariates(
     patch_crs: str | None = None,
     pt_crs: str = "EPSG:4326",
     concurrent_requests: int = 40,
+    max_attempts: int = 3,
 ) -> pd.DataFrame:
     """
     Extract average covariate values for a list of points and save as a Pandas DataFrame.
@@ -269,44 +271,66 @@ def extract_spatial_covariates(
     # Check inputs
     _validate_image_source(image=image, asset_id=asset_id)
     _validate_pts(patch_ids=patch_ids, pts=pts)
+    if not isinstance(max_attempts, int) or max_attempts < 1:
+        raise ValueError("max_attempts must be a positive integer")
 
-    future_to_point: dict[concurrent.futures.Future, str] = {}
-    patch_dfs: list[pd.DataFrame] = []
-    errors: list[tuple[str, Exception]] = []
-    with tqdm(total=len(pts)) as progbar:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=concurrent_requests
-        ) as executor:
-            for pt, pt_id in zip(pts, patch_ids, strict=True):
-                future = executor.submit(
-                    get_patch,
-                    image=image,
-                    asset_id=asset_id,
-                    pt=pt,
-                    pt_crs=pt_crs,
-                    patch_scale=patch_scale,
-                    patch_size=1,
-                    patch_crs=patch_crs,
-                )
-                future_to_point[future] = pt_id
+    def fetch_patches(patch_dict: dict):
 
-            for future in concurrent.futures.as_completed(future_to_point):
-                pt_id = future_to_point[future]
-                try:
-                    img = future.result()
-                    df = pd.DataFrame.from_records(img.reshape(-1))
-                    df["patch_id"] = pt_id
-                    patch_dfs.append(df)
+        future_to_point: dict[concurrent.futures.Future, str] = {}
+        results: dict[str, pd.DataFrame] = {}
+        failures: dict[str, Exception] = {}
 
-                except Exception as exc:  # noqa: BLE001
-                    errors.append((pt_id, exc))
+        with tqdm(total=len(patch_dict)) as progbar:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=concurrent_requests
+            ) as executor:
+                for pt_id, pt in patch_dict.items():
+                    future = executor.submit(
+                        get_patch,
+                        image=image,
+                        asset_id=asset_id,
+                        pt=pt,
+                        pt_crs=pt_crs,
+                        patch_scale=patch_scale,
+                        patch_size=1,
+                        patch_crs=patch_crs,
+                    )
+                    future_to_point[future] = pt_id
 
-                finally:
-                    future_to_point.pop(future)
-                    progbar.update()
+                for future in concurrent.futures.as_completed(future_to_point):
+                    pt_id = future_to_point[future]
+                    try:
+                        img = future.result()
+                        patch_df = pd.DataFrame.from_records(img.reshape(-1))
+                        patch_df["patch_id"] = pt_id
+                        results[pt_id] = patch_df
 
-    if errors:
-        raise RuntimeError(
-            f"{len(errors)} patches failed. First error: {errors[0][0]} {errors[0][1]!r}"
+                    except Exception as exc:  # noqa: BLE001
+                        failures[pt_id] = exc
+
+                    finally:
+                        future_to_point.pop(future)
+                        progbar.update()
+
+                return results, failures
+
+    patches_to_fetch = dict(zip(patch_ids, pts, strict=True))
+    all_results = {}
+    attempts = 0
+    while attempts < max_attempts:
+        results, failures = fetch_patches(patches_to_fetch)
+        all_results.update(results)
+        attempts += 1
+        if not failures:
+            break
+        ids_to_retry = set(failures.keys())
+        patches_to_fetch = {k: v for k, v in patches_to_fetch.items() if k in ids_to_retry}
+
+    if failures:
+        first_id, first_exc = next(iter(failures.items()))
+        warnings.warn(
+            f"{len(failures)} patches failed after {attempts} attempts. First error: {first_id} {first_exc}",
+            RuntimeWarning,
         )
-    return pd.concat(patch_dfs)
+
+    return pd.concat(all_results.values(), ignore_index=True).sort_values("patch_id")
