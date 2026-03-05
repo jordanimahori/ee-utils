@@ -8,9 +8,19 @@ class LandsatSR:
         end_date: str,
         bands: list[str] | None = None,
         platforms: list[str] | None = None,
-        rescale_bands: bool = True,
+        rescale_bands: bool = False,
+        mask_clouds: bool = True,
     ) -> None:
         """
+        Abstraction over Landsat Collection 2 Level-2 Surface Reflectance products (Landsat 4–9). When multiple sensor
+        families are requested (TM/ETM+ and OLI/OLI-2), bands are mapped to a common set of names (BLUE, GREEN, RED,
+        NIR, SWIR1, SWIR2) based on approximate spectral correspondence.
+
+        No spectral cross-calibration is applied. Although bands share semantic names, their spectral response functions
+        differ slightly across sensors (e.g., OLI vs. TM/ETM+), and sensors differ in native radiometric resolution and
+        noise characteristics. As a result, reflectance values within a harmonised band are comparable but not strictly
+        identical across platforms.
+
         Args:
             start_date: String representation of start date.
             end_date: String representation of end date.
@@ -20,96 +30,94 @@ class LandsatSR:
         """
         self.start_date = start_date
         self.end_date = end_date
-        self.bands = bands
         self.rescale_bands = rescale_bands
-        self.available_platforms = {
-            "LANDSAT_4",
-            "LANDSAT_5",
-            "LANDSAT_7",
-            "LANDSAT_8",
-            "LANDSAT_9",
-        }
-        self.available_bands = {
-            "BLUE",
-            "GREEN",
-            "RED",
-            "NIR",
-            "SWIR1",
-            "SWIR2",
-            "TEMP1",
+        self.mask_clouds = mask_clouds
+
+        sensor_families = {
+            "LANDSAT_4": "TM_ETM",
+            "LANDSAT_5": "TM_ETM",
+            "LANDSAT_7": "TM_ETM",
+            "LANDSAT_8": "OLI",
+            "LANDSAT_9": "OLI",
         }
 
-        # If no platforms provided, use all available
+        sensor_bands = {
+            "TM_ETM": ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"],
+            "OLI": ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"],
+            "HARMONISED": ["BLUE", "GREEN", "RED", "NIR", "SWIR1", "SWIR2"],
+        }
+
+        # Get platforms and sensors
+        valid_platforms = set(sensor_families.keys())
         if platforms is None:
-            self.platforms = self.available_platforms
+            self.platforms = valid_platforms
         elif isinstance(platforms, str):
             self.platforms = {platforms.upper()}
         else:
             self.platforms = {p.upper() for p in platforms}
 
-        # Check arguments
-        if not self.platforms.issubset(self.available_platforms):
+        if not self.platforms.issubset(valid_platforms):
             raise ValueError(
-                f"Platforms must be a subset of {self.available_platforms}"
+                f"Platforms must be a subset of {valid_platforms}"
             )
 
-        # Prep Landsat 4/5/7 with rescaling
+        # Harmonise band names if multiple sensor families are requested
+        self.sensors = {sensor_families[p] for p in self.platforms}
+        self.sensor_family = "HARMONISED" if len(self.sensors) > 1 else next(iter(self.sensors))
+        self.available_bands = sensor_bands[self.sensor_family]
+        self.bands = bands if bands is not None else self.available_bands
+        if not all([b in self.available_bands for b in self.bands]):
+            raise ValueError(f"Bands must be a subset of {self.available_bands}")
+
         def _prep_l47(image: ee.Image) -> ee.Image:
             """Mask clouds, rename bands, and rescale optical bands by EE default (for L4/5/7)."""
-            optical_bands = image.select("SR_B.")
+            mask = LandsatSR.get_cloud_mask(image) if self.mask_clouds else None
+            if self.sensor_family == "HARMONISED":
+                image = image.select(
+                ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"],
+                ["BLUE", "GREEN", "RED", "NIR", "SWIR1", "SWIR2"]
+                )
+            image = image.select(self.bands)
             if self.rescale_bands:
-                optical_bands = optical_bands.multiply(0.0000275).add(-0.2)
-            thermal_band = image.select("B6(_VCID_1)?")
-            scaled = optical_bands.addBands(thermal_band).select(
-                ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7", "B6(_VCID_1)?"],
-                ["BLUE", "GREEN", "RED", "NIR", "SWIR1", "SWIR2", "TEMP1"],
-            )
-            mask = LandsatSR.get_cloud_mask(image)
-            return image.select([]).addBands(scaled).updateMask(mask)
+                image = image.multiply(0.0000275).add(-0.2)
+            if mask is not None:
+                image = image.updateMask(mask)
+            return image
 
-        # Prep Landsat 8/9 with rescaling
         def _prep_l89(image: ee.Image) -> ee.Image:
             """Mask clouds, rename bands, and rescale optical bands by EE default (for L8/9)."""
-            optical_bands = image.select("SR_B.")
+            mask = LandsatSR.get_cloud_mask(image) if self.mask_clouds else None
+            if self.sensor_family == "HARMONISED":
+                image = image.select(
+                    ["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"],
+                    ["BLUE", "GREEN", "RED", "NIR", "SWIR1", "SWIR2"],
+                )
+            image = image.select(self.bands)
             if self.rescale_bands:
-                optical_bands = optical_bands.multiply(0.0000275).add(-0.2)
-            thermal_band = image.select("B10")
-            scaled = optical_bands.addBands(thermal_band).select(
-                ["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7", "B10"],
-                ["BLUE", "GREEN", "RED", "NIR", "SWIR1", "SWIR2", "TEMP1"],
-            )
-            mask = LandsatSR.get_cloud_mask(image)
-            return image.select([]).addBands(scaled).updateMask(mask)
+                image = image.multiply(0.0000275).add(-0.2)
+            if mask is not None:
+                image = image.updateMask(mask)
+            return image
 
         self.platform_configs = {
             "LANDSAT_4": {
-                "sr": "LANDSAT/LT04/C02/T1_L2",
-                "toa": "LANDSAT/LT04/C02/T1_TOA",
-                "thermal_band": "B6",
+                "image_collection": "LANDSAT/LT04/C02/T1_L2",
                 "prep_function": _prep_l47,
             },
             "LANDSAT_5": {
-                "sr": "LANDSAT/LT05/C02/T1_L2",
-                "toa": "LANDSAT/LT05/C02/T1_TOA",
-                "thermal_band": "B6",
+                "image_collection": "LANDSAT/LT05/C02/T1_L2",
                 "prep_function": _prep_l47,
             },
             "LANDSAT_7": {
-                "sr": "LANDSAT/LE07/C02/T1_L2",
-                "toa": "LANDSAT/LE07/C02/T1_TOA",
-                "thermal_band": "B6_VCID_1",
+                "image_collection": "LANDSAT/LE07/C02/T1_L2",
                 "prep_function": _prep_l47,
             },
             "LANDSAT_8": {
-                "sr": "LANDSAT/LC08/C02/T1_L2",
-                "toa": "LANDSAT/LC08/C02/T1_TOA",
-                "thermal_band": "B10",
+                "image_collection": "LANDSAT/LC08/C02/T1_L2",
                 "prep_function": _prep_l89,
             },
             "LANDSAT_9": {
-                "sr": "LANDSAT/LC09/C02/T1_L2",
-                "toa": "LANDSAT/LC09/C02/T1_TOA",
-                "thermal_band": "B10",
+                "image_collection": "LANDSAT/LC09/C02/T1_L2",
                 "prep_function": _prep_l89,
             },
         }
@@ -119,29 +127,26 @@ class LandsatSR:
         for platform in self.platforms:
             config = self.platform_configs[platform]
             col = (
-                ee.ImageCollection(config["sr"])
+                ee.ImageCollection(config["image_collection"])
                 .filterDate(self.start_date, self.end_date)
-                .linkCollection(  # join thermal band from TOA ee.ImageCollection
-                    ee.ImageCollection(config["toa"]),
-                    linkedBands=[config["thermal_band"]],
-                )
-                .map(
-                    config["prep_function"]
-                )  # mask low-quality pixels (and optionally rescale)
+                .map(config["prep_function"])
             )
-            # If bands are specified, filter the ee.ImageCollection.
-            if self.bands is not None:
-                col = col.select(self.bands)
             self.images = self.images.merge(col)
+        self.images = self.images.sort("system:time_start")
 
     @staticmethod
     def get_cloud_mask(image: ee.Image) -> ee.Image:
-        """Get mask for non-cloudy pixels for a Landsat image based on QA_PIXEL."""
-        qa = image.select(["QA_PIXEL"])
-        cloud_bit_mask = 1 << 3
-        cloud_shadow_bit_mask = 1 << 4
+        qa = image.select("QA_PIXEL")
+        fill = 1 << 0
+        dilated = 1 << 1
+        cirrus = 1 << 2
+        cloud = 1 << 3
+        shadow = 1 << 4
+
         return (
-            qa.bitwiseAnd(cloud_shadow_bit_mask)
-            .eq(0)
-            .And(qa.bitwiseAnd(cloud_bit_mask).eq(0))
+            qa.bitwiseAnd(fill).eq(0)
+            .And(qa.bitwiseAnd(dilated).eq(0))
+            .And(qa.bitwiseAnd(cloud).eq(0))
+            .And(qa.bitwiseAnd(shadow).eq(0))
+            .And(qa.bitwiseAnd(cirrus).eq(0))
         )
