@@ -1,12 +1,14 @@
-import re
-import ee
-import pandas as pd
 import concurrent.futures
 import warnings
 from os import PathLike
-from tqdm import tqdm
 from pathlib import Path
-from .geo import get_utm_epsg, wgs84_to_utm
+
+import ee
+import pandas as pd
+from pyproj import CRS, Transformer
+from tqdm import tqdm
+
+from .geo import get_utm_epsg
 
 
 def _validate_image_source(image: ee.Image | None, asset_id: str | None):
@@ -24,6 +26,36 @@ def _validate_pts(pts, patch_ids):
             raise ValueError("pts must be a list of tuples (lon, lat)")
 
 
+def _parse_crs(crs: str, arg_name: str) -> CRS:
+    try:
+        return CRS.from_user_input(crs)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"{arg_name} must be a valid CRS") from exc
+
+
+def _validate_patch_crs(patch_crs: str) -> str:
+    patch_crs_obj = _parse_crs(patch_crs, arg_name="patch_crs")
+    epsg = patch_crs_obj.to_epsg()
+    if epsg is None:
+        raise ValueError("patch_crs must resolve to an EPSG code")
+
+    if epsg == 3857 or 32601 <= epsg <= 32660 or 32701 <= epsg <= 32760:
+        return f"EPSG:{epsg}"
+
+    raise ValueError(
+        "patch_crs must be EPSG:3857 or a valid UTM EPSG code (EPSG:32601-32660 or EPSG:32701-32760)"
+    )
+
+
+def _transform_point(
+    pt: tuple[float, float], from_crs: str | CRS, to_crs: str | CRS
+) -> tuple[float, float]:
+    if CRS.from_user_input(from_crs) == CRS.from_user_input(to_crs):
+        return pt
+    transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
+    return transformer.transform(*pt)
+
+
 def _build_ee_request(
     pt: tuple[float, float],
     pt_crs: str = "EPSG:4326",
@@ -34,23 +66,16 @@ def _build_ee_request(
     add_y_offset: int = 0,
     file_format: str = "NUMPY_NDARRAY",
 ):
-    # Map pt to UTM if necessary
+    pt_crs_obj = _parse_crs(pt_crs, arg_name="pt_crs")
+
+    # Impute output patch_crs if not provided
     if patch_crs is None:
-        if pt_crs.lower() != "epsg:4326":
-            raise ValueError("pt_crs must be EPSG:4326 when patch_crs is omitted")
-        patch_crs = get_utm_epsg(pt)
-        centroid = wgs84_to_utm(pt, crs_epsg=patch_crs)
-    elif re.fullmatch(r"(?:epsg:)?(326|327)\d{2}", patch_crs.lower()):
-        if pt_crs.lower() == "epsg:4326":
-            centroid = wgs84_to_utm(pt, crs_epsg=patch_crs)
-        else:
-            if pt_crs.lower() != patch_crs.lower():
-                raise ValueError(
-                    "pt_crs must match patch_crs when coordinates are already UTM"
-                )
-            centroid = pt
+        pt_wgs84 = _transform_point(pt, from_crs=pt_crs_obj, to_crs="EPSG:4326")
+        patch_crs = get_utm_epsg(pt_wgs84)
     else:
-        raise ValueError("patch_crs must be None or a valid UTM EPSG code")
+        patch_crs = _validate_patch_crs(patch_crs)
+
+    centroid = _transform_point(pt, from_crs=pt_crs_obj, to_crs=patch_crs)
 
     # Ensure y-axis scale is negative so the grid is north-up
     if isinstance(patch_scale, int):

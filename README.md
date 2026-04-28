@@ -86,7 +86,7 @@ The workhorse utility is `get_patch()`, which underlies most functions in this p
 
 **Key features:**
 - Works with both Asset IDs (e.g., `"LANDSAT/LC09/C02/T1_L2/LC09_116050_20240110"`) and computed `ee.Image` objects
-- Automatic UTM projection when `patch_crs` is omitted
+- Supports arbitrary `pt_crs`; output `patch_crs` is validated as UTM (`EPSG:326xx`/`EPSG:327xx`) or `EPSG:3857`. If omitted, UTM is auto-detected.
 - Returns patch in requested format e.g. Numpy Array by default; GeoTIFF via `file_format="GEO_TIFF"`
 
 
